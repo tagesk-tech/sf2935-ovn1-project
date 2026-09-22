@@ -17,7 +17,7 @@ The project will:
 
 ```text
 code/       Python implementation and experiment entry point
-report/     LaTeX report source
+report/     LaTeX report source and supplied NeurIPS 2026 template
 results/    Generated figures and tables
 slides/     Presentation source
 ```
@@ -33,4 +33,3 @@ Group members will be added after the group is confirmed.
 ## Course integrity
 
 This repository contains coursework. The submitted implementation, experiment design, analysis, and writing must be understood and defensible by both group members. Any permitted AI assistance will be disclosed in the report according to the course instructions.
-
