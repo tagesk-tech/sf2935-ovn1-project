@@ -1,0 +1,17 @@
+{
+  "0.01": {
+    "mean_sliced_wasserstein": 0.1573332076271375,
+    "std_sliced_wasserstein": 0.056773664859009886,
+    "n_seeds": 3
+  },
+  "0.1": {
+    "mean_sliced_wasserstein": 0.1494449277718862,
+    "std_sliced_wasserstein": 0.06372995367626084,
+    "n_seeds": 3
+  },
+  "0.3": {
+    "mean_sliced_wasserstein": 0.1555501197775205,
+    "std_sliced_wasserstein": 0.06279167854088179,
+    "n_seeds": 3
+  }
+}

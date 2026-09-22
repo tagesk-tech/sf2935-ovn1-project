@@ -24,16 +24,13 @@ update the network parameters using the gradient of loss
 
 The six lines above are the mathematical core. The model, optimizer, sampler, tests, configuration, metrics, plots, and command-line entry point are supporting experimental machinery.
 
-## Components to implement
+## Three-file implementation
 
-1. `data.py`: deterministic two-dimensional checkerboard sampler.
-2. `model.py`: small multilayer perceptron mapping `(tau, x_tau)` to a two-dimensional velocity.
-3. `train.py`: the Conditional Flow Matching training step above.
-4. `sample.py`: fixed-step midpoint integration of `dx/dtau = vector_field(tau, x)`.
-5. `metrics.py`: sliced Wasserstein distance between held-out data and generated samples.
-6. `plots.py`: sample snapshots at several times and panels for several function-evaluation budgets.
-7. `run_all.py`: one command that trains, evaluates, and regenerates every result.
-8. `tests/`: analytic training-pair check, deterministic seed check, shape checks, and a zero-vector-field sampler check.
+1. `data.py`: deterministic two-dimensional checkerboard sampler and minibatches.
+2. `flow_matching.py`: time-conditioned MLP, conditional Flow Matching objective,
+   and fixed-step midpoint integration of `dx/dtau = vector_field(tau, x)`.
+3. `experiments.py`: training loop, deterministic self-tests, sliced Wasserstein
+   metric, plotting, variation sweep, and the one-command entry point.
 
 ## Reproduction
 
@@ -72,4 +69,3 @@ Hold architecture, training budget, dataset, seeds, solver, and metric protocol 
 - complete reproducible experiment: roughly 180–300 clear lines, excluding tests and comments.
 
 Short code is plausible. Short reasoning is not.
-

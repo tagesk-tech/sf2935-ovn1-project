@@ -1,0 +1,36 @@
+{
+  "seeds": [
+    11,
+    22,
+    33
+  ],
+  "sigma_values": [
+    0.01,
+    0.1,
+    0.3
+  ],
+  "baseline_sigma": 0.1,
+  "n_train": 20000,
+  "n_test": 5000,
+  "n_generated": 5000,
+  "batch_size": 512,
+  "train_steps": 5000,
+  "learning_rate": 0.002,
+  "hidden_dim": 128,
+  "n_hidden_layers": 3,
+  "metric_projections": 256,
+  "evaluation_nfe": 20,
+  "panel_nfes": [
+    4,
+    8,
+    10,
+    20
+  ],
+  "device": "cpu",
+  "environment": {
+    "python": "3.12.14",
+    "torch": "2.14.0+cu130",
+    "numpy": "2.5.3",
+    "matplotlib": "3.11.2"
+  }
+}
