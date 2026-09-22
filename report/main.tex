@@ -99,8 +99,8 @@ Figure~4 establishes the qualitative checkerboard experiment, but does not fully
 
 Figure~\ref{fig:trajectory} shows the qualitative probability path. Structure appears by $t=2/3$, and the final cloud occupies all eight modes. Compared with the sharp uniform target tiles, the model retains rounded boundaries and some probability mass in the gaps. This is a successful reduced reproduction of the paper's central visual mechanism, but not an exact reconstruction of its unpublished toy hyperparameters.
 
-\paragraph{Verification.}
-Before training, deterministic tests check data seeding and tensor shapes. For the hand-worked case $Z=(1,-2)$, $X_1=(3,1)$, $t=0.25$, and $\smin=0.1$, the implementation returns $X_t=(1.525,-1.3)$ and target velocity $(2.1,2.8)$. A constant-vector-field test also verifies the midpoint integrator exactly.
+\paragraph{Hand check.}
+For $Z=(1,-2)$, $X_1=(3,1)$, $t=0.25$, and $\smin=0.1$, Eqs.~\eqref{eq:path}--\eqref{eq:target} give $X_t=(1.525,-1.3)$ and target velocity $(2.1,2.8)$. We used this calculation to check the core path and velocity formulas before running the experiment.
 
 \clearpage
 \subsection{Sampling cost}

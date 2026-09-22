@@ -4,10 +4,7 @@ Course project for **SF2935 — Modern Methods of Statistical Learning** at KTH 
 
 ## Project
 
-We study **Flow Matching for Generative Modeling** (Lipman et al., 2023). The
-code implements Conditional Flow Matching with the conditional
-optimal-transport probability path and trains a time-conditioned neural vector
-field on two-dimensional checkerboard data.
+We study **Flow Matching for Generative Modeling** (Lipman et al., 2023). The code implements Conditional Flow Matching with the conditional optimal-transport probability path and trains a time-conditioned neural vector field on two-dimensional checkerboard data.
 
 The reduced reproduction follows the mechanism of Figure 4 in the paper:
 
@@ -15,19 +12,17 @@ The reduced reproduction follows the mechanism of Figure 4 in the paper:
 - compare midpoint-ODE samples at NFE `4`, `8`, `10`, and `20`; and
 - report sliced Wasserstein distance against held-out checkerboard samples.
 
-The project variation changes only `sigma_min`, the residual endpoint noise,
-using values `0.01`, `0.10`, and `0.30` over three fixed random seeds. This
-tests the tradeoff between a sharp endpoint and an easier, smoother transport.
+The project variation changes only `sigma_min`, the residual endpoint noise, using values `0.01`, `0.10`, and `0.30` over three fixed random seeds. This tests the tradeoff between a sharp endpoint and an easier, smoother transport.
 
 ## Repository structure
 
 ```text
-code/data.py           deterministic checkerboard data handling
-code/flow_matching.py  CFM objective, neural vector field, ODE samplers
-code/experiments.py    training, evaluation, plots, and command-line entry point
-report/     LaTeX report source and supplied NeurIPS 2026 template
-results/    Generated figures and metric tables (checkpoints are ignored)
-slides/     Presentation source
+code/data.py           checkerboard data handling
+code/flow_matching.py  CFM loss, neural vector field, midpoint sampler
+code/experiments.py    training, evaluation, plots, and experiment entry point
+report/                 LaTeX report source and supplied NeurIPS 2026 template
+results/                generated figures and metric tables
+slides/                 presentation source
 ```
 
 ## Reproduction
@@ -37,29 +32,12 @@ Python 3.12 is recommended. From the repository root:
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-.venv/bin/python code/experiments.py --self-test
 .venv/bin/python code/experiments.py
 ```
 
-The last command is the full experiment: nine fits from three seeds crossed
-with three `sigma_min` values. It writes the exact configuration, raw metrics,
-grouped summary, figures, and model checkpoints to `results/`.
+The last command runs the complete experiment: nine fits from three seeds crossed with three `sigma_min` values. It writes the configuration, raw metrics, summary, figures, and model checkpoints to `results/`.
 
-For a fast end-to-end smoke test that is not intended as report evidence:
-
-```bash
-.venv/bin/python code/experiments.py --quick
-```
-
-Useful transparent overrides include:
-
-```bash
-.venv/bin/python code/experiments.py --train-steps 2000 --seeds 11 --sigma-values 0.1
-```
-
-No Flow Matching library is used. PyTorch supplies tensor operations,
-automatic differentiation, and the Adam optimizer; the probability path,
-velocity target, training loss, and midpoint sampler are implemented directly.
+No Flow Matching library is used. PyTorch supplies tensor operations, automatic differentiation, and Adam; the probability path, velocity target, training loss, and midpoint sampler are implemented directly.
 
 ## Output files
 
@@ -67,12 +45,9 @@ velocity target, training loss, and midpoint sampler are implemented directly.
 - `reproduction_nfe.png`: held-out target and four solver budgets;
 - `nfe_metrics.csv`: quantitative comparison across NFE values;
 - `variation_sigma_min.png`: mean and standard deviation across seeds;
-- `variation_samples.png`: paired-noise qualitative comparison across `sigma_min`;
-- `metrics.csv` and `summary.json`: raw and aggregated experiment results;
+- `variation_samples.png`: paired-noise comparison across `sigma_min`;
+- `metrics.csv` and `summary.json`: raw and aggregated results;
 - `baseline_training_loss.png`: optimization diagnostic.
-
-The code records all seeds and configuration values. Report conclusions should
-be based on the full run, not the `--quick` smoke test.
 
 ## Authors
 

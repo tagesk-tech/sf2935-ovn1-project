@@ -1,434 +1,192 @@
-"""Train, evaluate, and plot the reduced Flow Matching reproduction.
+"""Run the checkerboard reproduction and sigma_min variation."""
 
-Commands:
-    python code/experiments.py --self-test
-    python code/experiments.py --quick
-    python code/experiments.py
-"""
-
-from __future__ import annotations
-
-import argparse
 import csv
 import json
 import random
 import sys
-from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch import Tensor, nn
 
-from data import sample_checkerboard, sample_minibatch, train_test_checkerboard
-from flow_matching import (
-    TimeConditionedVectorField,
-    conditional_flow_matching_loss,
-    make_ot_cfm_training_pair,
-    sample_midpoint,
-    sample_trajectory,
-)
+from data import checkerboard, minibatch
+from flow_matching import VectorField, cfm_loss, sample
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RESULTS_DIR = REPOSITORY_ROOT / "results"
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "results"
+SEEDS = (11, 22, 33)
+SIGMAS = (0.01, 0.10, 0.30)
+TRAIN_STEPS = 5_000
+BATCH_SIZE = 512
+N_TRAIN = 20_000
+N_TEST = N_GENERATED = 5_000
+NFE_VALUES = (4, 8, 10, 20)
 
 
-@dataclass(frozen=True)
-class ExperimentConfig:
-    seeds: tuple[int, ...] = (11, 22, 33)
-    sigma_values: tuple[float, ...] = (0.01, 0.10, 0.30)
-    baseline_sigma: float = 0.10
-    n_train: int = 20_000
-    n_test: int = 5_000
-    n_generated: int = 5_000
-    batch_size: int = 512
-    train_steps: int = 5_000
-    learning_rate: float = 2e-3
-    hidden_dim: int = 128
-    n_hidden_layers: int = 3
-    metric_projections: int = 256
-    evaluation_nfe: int = 20
-    panel_nfes: tuple[int, ...] = (4, 8, 10, 20)
-
-
-def set_seed(seed: int) -> None:
-    """Set all random sources used by the experiment."""
+def train(seed, sigma_min, device):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
-
-def train_model(
-    config: ExperimentConfig,
-    *,
-    seed: int,
-    sigma_min: float,
-    device: torch.device,
-) -> tuple[nn.Module, list[float]]:
-    """Train one neural vector field and return its loss history."""
-    set_seed(seed)
-    train_data, _ = train_test_checkerboard(
-        config.n_train, config.n_test, seed=10_000 + seed, device=device
-    )
-    model = TimeConditionedVectorField(
-        hidden_dim=config.hidden_dim, n_hidden_layers=config.n_hidden_layers
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+    data = checkerboard(N_TRAIN, 10_000 + seed, device)
+    model = VectorField().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
     generator = torch.Generator(device=device).manual_seed(20_000 + seed)
-    losses: list[float] = []
+    losses = []
 
-    model.train()
-    for step in range(config.train_steps):
-        batch = sample_minibatch(train_data, config.batch_size, generator)
-        loss = conditional_flow_matching_loss(
-            model, batch, sigma_min=sigma_min, generator=generator
-        )
+    for step in range(TRAIN_STEPS):
+        x_data = minibatch(data, BATCH_SIZE, generator)
+        loss = cfm_loss(model, x_data, sigma_min, generator)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
-        losses.append(float(loss.detach()))
-        if (step + 1) % max(config.train_steps // 10, 1) == 0:
-            print(
-                f"seed={seed:02d} sigma={sigma_min:.3f} "
-                f"step={step + 1:5d}/{config.train_steps} loss={losses[-1]:.5f}",
-                flush=True,
-            )
+        losses.append(loss.item())
+        if (step + 1) % 500 == 0:
+            print(f"seed={seed} sigma={sigma_min:.2f} step={step + 1} loss={loss.item():.4f}")
     return model.eval(), losses
 
 
 @torch.inference_mode()
-def sliced_wasserstein_distance(
-    first: Tensor,
-    second: Tensor,
-    *,
-    n_projections: int,
-    seed: int,
-) -> float:
-    """Estimate 2-Wasserstein distance averaged over random 1-D slices."""
-    if first.ndim != 2 or second.ndim != 2 or first.shape[1] != second.shape[1]:
-        raise ValueError("inputs must be matrices with the same feature dimension")
-    n = min(len(first), len(second))
-    first = first[:n]
-    second = second[:n]
-    generator = torch.Generator(device=first.device).manual_seed(seed)
-    directions = torch.randn(
-        (n_projections, first.shape[1]), generator=generator, device=first.device
-    )
-    directions = directions / directions.norm(dim=1, keepdim=True)
-    first_projection = torch.sort(first @ directions.T, dim=0).values
-    second_projection = torch.sort(second @ directions.T, dim=0).values
-    return float(torch.sqrt((first_projection - second_projection).square().mean()).cpu())
+def sliced_wasserstein(x, y, seed, projections=256):
+    n = min(len(x), len(y))
+    generator = torch.Generator(device=x.device).manual_seed(seed)
+    directions = torch.randn((projections, 2), generator=generator, device=x.device)
+    directions /= directions.norm(dim=1, keepdim=True)
+    x_proj = torch.sort(x[:n] @ directions.T, dim=0).values
+    y_proj = torch.sort(y[:n] @ directions.T, dim=0).values
+    return torch.sqrt(((x_proj - y_proj) ** 2).mean()).item()
 
 
-def plot_scatter_panels(samples: list[Tensor], titles: list[str], destination: Path) -> None:
-    """Save equally scaled scatter panels for qualitative comparison."""
-    fig, axes = plt.subplots(
-        1, len(samples), figsize=(3.0 * len(samples), 3.0), sharex=True, sharey=True
-    )
+def scatter_panels(samples, titles, filename):
+    fig, axes = plt.subplots(1, len(samples), figsize=(3 * len(samples), 3), sharex=True, sharey=True)
     axes = np.atleast_1d(axes)
-    for axis, points, title in zip(axes, samples, titles, strict=True):
-        values = points.detach().cpu().numpy()
-        axis.scatter(values[:, 0], values[:, 1], s=2, alpha=0.45, rasterized=True)
-        axis.set_title(title)
-        axis.set_aspect("equal")
-        axis.set_xlim(-5.0, 5.0)
-        axis.set_ylim(-5.0, 5.0)
-        axis.set_xlabel("$x_1$")
+    for ax, points, title in zip(axes, samples, titles):
+        points = points.cpu().numpy()
+        ax.scatter(points[:, 0], points[:, 1], s=2, alpha=0.45, rasterized=True)
+        ax.set(title=title, xlim=(-5, 5), ylim=(-5, 5), xlabel="$x_1$")
+        ax.set_aspect("equal")
     axes[0].set_ylabel("$x_2$")
     fig.tight_layout()
-    fig.savefig(destination, dpi=200, bbox_inches="tight")
+    fig.savefig(OUT / filename, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_training_curve(losses: list[float], destination: Path) -> None:
-    """Plot a moving-average training loss."""
-    window = min(100, max(1, len(losses) // 10))
-    smoothed = np.convolve(losses, np.ones(window) / window, mode="valid")
-    fig, axis = plt.subplots(figsize=(5.5, 3.3))
-    axis.plot(np.arange(window - 1, len(losses)), smoothed)
-    axis.set(
-        xlabel="Training step",
-        ylabel="CFM loss",
-        title=f"Training loss ({window}-step mean)",
-    )
-    axis.grid(alpha=0.25)
+def training_plot(losses):
+    smooth = np.convolve(losses, np.ones(100) / 100, mode="valid")
+    fig, ax = plt.subplots(figsize=(5.5, 3.3))
+    ax.plot(np.arange(99, len(losses)), smooth)
+    ax.set(xlabel="Training step", ylabel="CFM loss", title="Training loss (100-step mean)")
+    ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(destination, dpi=200, bbox_inches="tight")
+    fig.savefig(OUT / "baseline_training_loss.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
-def run_single(
-    config: ExperimentConfig,
-    *,
-    seed: int,
-    sigma_min: float,
-    device: torch.device,
-    results_dir: Path,
-) -> tuple[dict[str, float | int], nn.Module, list[float]]:
-    """Train and evaluate one seed/sigma configuration."""
-    model, losses = train_model(config, seed=seed, sigma_min=sigma_min, device=device)
-    test = sample_checkerboard(config.n_test, seed=30_000 + seed, device=device)
-    generator = torch.Generator(device=device).manual_seed(40_000 + seed)
-    noise = torch.randn((config.n_generated, 2), generator=generator, device=device)
-    generated = sample_midpoint(model, noise, n_function_evaluations=config.evaluation_nfe)
-    metric = sliced_wasserstein_distance(
-        test,
-        generated,
-        n_projections=config.metric_projections,
-        seed=50_000 + seed,
+def main():
+    device = torch.device("cpu")
+    OUT.mkdir(exist_ok=True)
+    rows, examples = [], {}
+    comparison_noise = torch.randn(
+        (2_500, 2), generator=torch.Generator(device=device).manual_seed(90_011), device=device
     )
-    row: dict[str, float | int] = {
-        "seed": seed,
-        "sigma_min": sigma_min,
-        "sliced_wasserstein": metric,
-        "final_training_loss": float(np.mean(losses[-100:])),
-    }
-    checkpoint = results_dir / f"model_seed-{seed}_sigma-{sigma_min:.3f}.pt"
-    torch.save({"model": model.state_dict(), "config": asdict(config), **row}, checkpoint)
-    return row, model, losses
 
+    for sigma_min in SIGMAS:
+        for seed in SEEDS:
+            model, losses = train(seed, sigma_min, device)
+            test = checkerboard(N_TEST, 30_000 + seed, device)
+            generator = torch.Generator(device=device).manual_seed(40_000 + seed)
+            noise = torch.randn((N_GENERATED, 2), generator=generator, device=device)
+            generated = sample(model, noise, nfe=20)
+            distance = sliced_wasserstein(test, generated, 50_000 + seed)
+            rows.append((seed, sigma_min, distance, np.mean(losses[-100:])))
+            torch.save(model.state_dict(), OUT / f"model_seed-{seed}_sigma-{sigma_min:.3f}.pt")
 
-def create_reproduction_figures(
-    model: nn.Module,
-    losses: list[float],
-    config: ExperimentConfig,
-    *,
-    seed: int,
-    device: torch.device,
-    results_dir: Path,
-) -> None:
-    """Create the reduced Figure-4-style trajectory and NFE panels."""
-    generator = torch.Generator(device=device).manual_seed(60_000 + seed)
-    noise = torch.randn((2_500, 2), generator=generator, device=device)
-    target = sample_checkerboard(len(noise), seed=70_000 + seed, device=device)
-    snapshots = sample_trajectory(model, noise, n_steps=30)
-    times = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
-    plot_scatter_panels(
-        [snapshots[t] for t in times],
-        [f"$t={t:.2f}$" for t in times],
-        results_dir / "reproduction_trajectory.png",
+            if seed == 11:
+                examples[sigma_min] = sample(model, comparison_noise, nfe=20).cpu()
+            if seed == 11 and sigma_min == 0.10:
+                figure_noise = torch.randn(
+                    (2_500, 2), generator=torch.Generator(device=device).manual_seed(60_011), device=device
+                )
+                times = (0, 1 / 3, 2 / 3, 1)
+                trajectory = [
+                    figure_noise if t == 0 else sample(model, figure_noise, nfe=round(60 * t), end_time=t)
+                    for t in times
+                ]
+                scatter_panels(trajectory, [f"$t={t:.2f}$" for t in times], "reproduction_trajectory.png")
+
+                target = checkerboard(2_500, 70_011, device)
+                nfe_samples = {nfe: sample(model, figure_noise, nfe=nfe) for nfe in NFE_VALUES}
+                scatter_panels(
+                    [target, *nfe_samples.values()],
+                    ["Target data", *(f"NFE = {nfe}" for nfe in NFE_VALUES)],
+                    "reproduction_nfe.png",
+                )
+                with (OUT / "nfe_metrics.csv").open("w", newline="") as handle:
+                    writer = csv.writer(handle, lineterminator="\n")
+                    writer.writerow(("nfe", "sliced_wasserstein"))
+                    for nfe, points in nfe_samples.items():
+                        writer.writerow((nfe, sliced_wasserstein(target, points, 80_011)))
+                training_plot(losses)
+
+    scatter_panels(
+        [examples[sigma] for sigma in SIGMAS],
+        [f"$\\sigma_{{min}}={sigma:.2f}$" for sigma in SIGMAS],
+        "variation_samples.png",
     )
-    generated_by_nfe = {
-        nfe: sample_midpoint(model, noise, n_function_evaluations=nfe)
-        for nfe in config.panel_nfes
-    }
-    plot_scatter_panels(
-        [target, *generated_by_nfe.values()],
-        ["Target data", *(f"NFE = {nfe}" for nfe in config.panel_nfes)],
-        results_dir / "reproduction_nfe.png",
-    )
-    with (results_dir / "nfe_metrics.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=["nfe", "sliced_wasserstein"], lineterminator="\n"
-        )
-        writer.writeheader()
-        for nfe, generated in generated_by_nfe.items():
-            writer.writerow(
-                {
-                    "nfe": nfe,
-                    "sliced_wasserstein": sliced_wasserstein_distance(
-                        target,
-                        generated,
-                        n_projections=config.metric_projections,
-                        seed=80_000 + seed,
-                    ),
-                }
-            )
-    plot_training_curve(losses, results_dir / "baseline_training_loss.png")
 
-
-def write_summary(rows: list[dict[str, float | int]], results_dir: Path) -> None:
-    """Write raw metrics, grouped statistics, and the variation plot."""
-    fieldnames = ["seed", "sigma_min", "sliced_wasserstein", "final_training_loss"]
-    with (results_dir / "metrics.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
-        writer.writeheader()
+    with (OUT / "metrics.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(("seed", "sigma_min", "sliced_wasserstein", "final_training_loss"))
         writer.writerows(rows)
 
-    grouped: dict[float, list[float]] = {}
-    for row in rows:
-        grouped.setdefault(float(row["sigma_min"]), []).append(float(row["sliced_wasserstein"]))
-    summary = {
-        str(sigma): {
+    summary = {}
+    for sigma in SIGMAS:
+        values = [row[2] for row in rows if row[1] == sigma]
+        summary[str(sigma)] = {
             "mean_sliced_wasserstein": float(np.mean(values)),
-            "std_sliced_wasserstein": (
-                float(np.std(values, ddof=1)) if len(values) > 1 else None
-            ),
+            "std_sliced_wasserstein": float(np.std(values, ddof=1)),
             "n_seeds": len(values),
         }
-        for sigma, values in grouped.items()
-    }
-    (results_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
-    )
+    (OUT / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
-    sigmas = sorted(grouped)
-    means = [np.mean(grouped[sigma]) for sigma in sigmas]
-    errors = [
-        np.std(grouped[sigma], ddof=1) if len(grouped[sigma]) > 1 else 0.0 for sigma in sigmas
-    ]
-    fig, axis = plt.subplots(figsize=(5.5, 3.3))
-    axis.errorbar(sigmas, means, yerr=errors, marker="o", capsize=4)
-    axis.set(
-        xlabel="$\\sigma_{min}$",
-        ylabel="Sliced Wasserstein distance",
-        title="Endpoint smoothing variation",
-    )
-    axis.grid(alpha=0.25)
+    means = [summary[str(s)]["mean_sliced_wasserstein"] for s in SIGMAS]
+    errors = [summary[str(s)]["std_sliced_wasserstein"] for s in SIGMAS]
+    fig, ax = plt.subplots(figsize=(5.5, 3.3))
+    ax.errorbar(SIGMAS, means, yerr=errors, marker="o", capsize=4)
+    ax.set(xlabel="$\\sigma_{min}$", ylabel="Sliced Wasserstein distance", title="Endpoint smoothing variation")
+    ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(results_dir / "variation_sigma_min.png", dpi=200, bbox_inches="tight")
+    fig.savefig(OUT / "variation_sigma_min.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-
-def self_test() -> None:
-    """Run deterministic checks before spending time on training."""
-    first = sample_checkerboard(32, seed=7)
-    second = sample_checkerboard(32, seed=7)
-    assert first.shape == (32, 2)
-    torch.testing.assert_close(first, second)
-
-    model = TimeConditionedVectorField(hidden_dim=16, n_hidden_layers=1)
-    assert model(torch.zeros(4, 1), torch.zeros(4, 2)).shape == (4, 2)
-
-    x_data = torch.tensor([[3.0, 1.0]])
-    noise = torch.tensor([[1.0, -2.0]])
-    time = torch.tensor([[0.25]])
-    _, x_time, target = make_ot_cfm_training_pair(
-        x_data, sigma_min=0.1, noise=noise, time=time
-    )
-    torch.testing.assert_close(x_time, torch.tensor([[1.525, -1.3]]))
-    torch.testing.assert_close(target, torch.tensor([[2.1, 2.8]]))
-
-    class ConstantField(nn.Module):
-        def forward(self, time: Tensor, position: Tensor) -> Tensor:
-            return torch.ones_like(position)
-
-    start = torch.zeros(5, 2)
-    end = sample_midpoint(ConstantField(), start, n_function_evaluations=4)
-    torch.testing.assert_close(end, torch.ones_like(start))
-
-    identical_distance = sliced_wasserstein_distance(
-        first, first.clone(), n_projections=16, seed=8
-    )
-    assert identical_distance == 0.0
-    print("All self-tests passed.")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="small smoke run, not report evidence")
-    parser.add_argument("--self-test", action="store_true", help="run deterministic checks and exit")
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
-    parser.add_argument("--train-steps", type=int, help="override the configured training budget")
-    parser.add_argument("--seeds", type=int, nargs="+", help="override the configured random seeds")
-    parser.add_argument(
-        "--sigma-values", type=float, nargs="+", help="override the sigma_min variation values"
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    if args.self_test:
-        self_test()
-        return
-
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise SystemExit("CUDA was requested but is unavailable")
-
-    config = ExperimentConfig()
-    if args.quick:
-        config = replace(
-            config,
-            seeds=(11,),
-            sigma_values=(config.baseline_sigma,),
-            n_train=2_000,
-            n_test=1_000,
-            n_generated=1_000,
-            train_steps=300,
-            hidden_dim=64,
-            n_hidden_layers=2,
-            metric_projections=64,
-        )
-    if args.train_steps is not None:
-        if args.train_steps <= 0:
-            raise SystemExit("--train-steps must be positive")
-        config = replace(config, train_steps=args.train_steps)
-    if args.seeds is not None:
-        config = replace(config, seeds=tuple(args.seeds))
-    if args.sigma_values is not None:
-        if any(not 0.0 <= value < 1.0 for value in args.sigma_values):
-            raise SystemExit("every --sigma-values entry must lie in [0, 1)")
-        config = replace(config, sigma_values=tuple(args.sigma_values))
-
-    results_dir = args.results_dir.resolve()
-    results_dir.mkdir(parents=True, exist_ok=True)
-    (results_dir / "config.json").write_text(
-        json.dumps(
-            {
-                **asdict(config),
-                "device": str(device),
-                "environment": {
-                    "python": sys.version.split()[0],
-                    "torch": torch.__version__,
-                    "numpy": np.__version__,
-                    "matplotlib": matplotlib.__version__,
-                },
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"Running on {device}; results -> {results_dir}")
-
-    rows: list[dict[str, float | int]] = []
-    comparison_generator = torch.Generator(device=device).manual_seed(90_000 + config.seeds[0])
-    comparison_noise = torch.randn(
-        (2_500, 2), generator=comparison_generator, device=device
-    )
-    variation_examples: dict[float, Tensor] = {}
-    for sigma_min in config.sigma_values:
-        for seed in config.seeds:
-            row, model, losses = run_single(
-                config,
-                seed=seed,
-                sigma_min=sigma_min,
-                device=device,
-                results_dir=results_dir,
-            )
-            rows.append(row)
-            if seed == config.seeds[0]:
-                variation_examples[sigma_min] = sample_midpoint(
-                    model,
-                    comparison_noise,
-                    n_function_evaluations=config.evaluation_nfe,
-                ).cpu()
-            if sigma_min == config.baseline_sigma and seed == config.seeds[0]:
-                create_reproduction_figures(
-                    model,
-                    losses,
-                    config,
-                    seed=seed,
-                    device=device,
-                    results_dir=results_dir,
-                )
-    write_summary(rows, results_dir)
-    plot_scatter_panels(
-        [variation_examples[sigma] for sigma in config.sigma_values],
-        [f"$\\sigma_{{min}}={sigma:.2f}$" for sigma in config.sigma_values],
-        results_dir / "variation_samples.png",
-    )
-    print("Experiment complete. Inspect metrics.csv, summary.json, and the PNG figures.")
+    config = {
+        "seeds": SEEDS,
+        "sigma_values": SIGMAS,
+        "baseline_sigma": 0.10,
+        "n_train": N_TRAIN,
+        "n_test": N_TEST,
+        "n_generated": N_GENERATED,
+        "batch_size": BATCH_SIZE,
+        "train_steps": TRAIN_STEPS,
+        "learning_rate": 2e-3,
+        "hidden_dim": 128,
+        "n_hidden_layers": 3,
+        "metric_projections": 256,
+        "evaluation_nfe": 20,
+        "panel_nfes": NFE_VALUES,
+        "device": str(device),
+        "environment": {
+            "python": sys.version.split()[0],
+            "torch": torch.__version__,
+            "numpy": np.__version__,
+            "matplotlib": matplotlib.__version__,
+        },
+    }
+    (OUT / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    print(f"Done. Results saved to {OUT}")
 
 
 if __name__ == "__main__":
